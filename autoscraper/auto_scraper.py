@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import unicodedata
@@ -6,6 +7,7 @@ from collections import defaultdict
 from html import unescape
 from urllib.parse import urljoin, urlparse
 
+import aiohttp
 import requests
 from bs4 import BeautifulSoup
 
@@ -37,6 +39,8 @@ class AutoScraper(object):
     keep_rules() - Keeps only the specified learned rules in the stack_list and removes the others.
     """
 
+    async_session: aiohttp.ClientSession = None
+    async_loop: asyncio.AbstractEventLoop = None
     request_headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/537.36 \
             (KHTML, like Gecko) Chrome/84.0.4147.135 Safari/537.36'
@@ -44,6 +48,13 @@ class AutoScraper(object):
 
     def __init__(self, stack_list=None):
         self.stack_list = stack_list or []
+
+    @classmethod
+    async def __aenter__(cls, stack_list=None):
+        cls.async_loop = asyncio.new_event_loop()
+        session = aiohttp.ClientSession(loop=cls.async_loop)
+        cls.async_session = session
+        return cls.__init__(stack_list)
 
     def save(self, file_path):
         """
@@ -101,10 +112,24 @@ class AutoScraper(object):
 
         user_headers = request_args.pop('headers', {})
         headers.update(user_headers)
-        html = requests.get(url, headers=headers, **request_args).text
+        if cls.async_session is not None:
+            task = cls.async_loop.create_task(cls._get_async_request(headers, request_args, url))
+            html = asyncio.run(task)
+        else:
+            html = cls._get_request(headers, request_args, url)
         html = unicodedata.normalize("NFKD", unescape(html))
 
         return BeautifulSoup(html, 'lxml')
+
+    @classmethod
+    def _get_request(cls, headers, request_args, url):
+        html = requests.get(url, headers=headers, **request_args).text
+        return html
+
+    @classmethod
+    async def _get_async_request(cls, headers, request_args, url):
+        async with cls.async_session.get(url, headers=headers, **request_args) as response:
+            return await response.text()
 
     @staticmethod
     def _get_valid_attrs(item):
@@ -174,7 +199,7 @@ class AutoScraper(object):
             A list of needed contents to be scraped.
                 AutoScraper learns a set of rules to scrape these targets. If specified,
                 wanted_dict will be ignored.
-        
+
         wanted_dict: dict, optional
             A dict of needed contents to be scraped. Keys are aliases and values are list of target texts.
                 AutoScraper learns a set of rules to scrape these targets and sets its aliases.
